@@ -25,6 +25,7 @@ Orientador: Prof. Elias P. Duarte Jr.
 #define receive_ack 5
 #define broadcast 6
 #define new_msg 7
+#define propose 8
 
 /*--------definicoes usadas pela funcao cisj--------*/
 #define POW_2(num) (1<<(num)) //equivale a 2 elevado a num (sendo num o tamanho dos clusters)
@@ -41,6 +42,8 @@ std:: vector<tmsg> mensagens;
 
 //ultima mensagem utilizada pelo programa (para enviar/receber)
 auto ultima_msg = std::make_unique<tmsg>();
+
+int ultima_rodada, ultimo_valor;
 
 /*--------estrutura da tripla armazenada pelo ack_set--------*/
 struct tset{
@@ -67,8 +70,13 @@ typedef struct{
 	int *state; //vetor state do nodo
 	std:: vector<tmsg> last; //vetor com a ultima mensagem recebida de cada processo fonte
 	std:: set<tset> ack_set; //set de tset
+	int proposal; //para consenso
+	int proposer;
 }tnodo;
 std:: vector<tnodo> nodo;
+
+std:: vector<bool> delivered;
+std:: vector<bool> brcast;
 
 /*--------estrutura do vetor de testes--------*/
 typedef struct{
@@ -85,7 +93,10 @@ typedef struct node_set {
 	ssize_t offset;
 } node_set;
 
-int token, N, timestamp = 0, s, ultimo_nodo;
+int token, N, timestamp = 0, s, ultimo_nodo, rodada = 1, proposal = -1, proposer = -1;
+//vetor com os nodos detectados como falhos
+std:: vector<int> detected;
+
 /*--------funcoes usadas pelo cisj--------*/
 static node_set*
 set_new(ssize_t size)
@@ -250,9 +261,18 @@ void freceive(int enviou, int recebeu){
 		nodo[recebeu].last[ultima_msg->idorigem].idorigem = ultima_msg->idorigem;
 		nodo[recebeu].last[ultima_msg->idorigem].timestamp = ultima_msg->timestamp;
 		//deliver(m)
-		std::cout <<"[DELIVER] mensagem \"" << nodo[recebeu].last[ultima_msg->idorigem].m << "\" recebida do nodo " << enviou <<" foi entregue para a aplicacao pelo processo " << recebeu << " no tempo {" << time() << "}\n\n";
+		std::cout <<"[DELIVER] mensagem \"" << nodo[recebeu].last[ultima_msg->idorigem].m << "\" recebida do nodo " << enviou <<" foi entregue para a aplicacao pelo processo " << recebeu << " no tempo {" << time() << "}\n";
 		// printf("Nodo: %d\n", nodo[ultima_msg->idorigem].idr);
 		// printf("Status do nodo: %d\n", status(nodo[ultima_msg->idorigem].id));
+
+		if(ultima_rodada < nodo[recebeu].idr + 1 && ultima_rodada > nodo[recebeu].proposer){
+			nodo[recebeu].proposal = ultimo_valor;
+			nodo[recebeu].proposer = ultima_rodada;
+			delivered[ultima_rodada] = true;
+			printf("[DECIDE] O nodo %d decidiu pelo valor %d que foi recebido do nodo %d\n", recebeu, nodo[recebeu].proposal, enviou);
+			// printf("O valor proposer é::::: %d\n", nodo[recebeu].proposer);
+		}
+
 		if(status(nodo[ultima_msg->idorigem].id) != 0){
 			// std::cout <<"Fazendo novo broadcast para os vizinhos sem-falha... " << "\n";
 			schedule(broadcast, 1.0, recebeu);
@@ -405,6 +425,46 @@ void crash(tnodo j){
 /*---------------fim funcoes broadcast-----------------*/
 
 
+void verify(int n){
+	int tam;
+	//n + 1  porque as rodadas comecam em 1 e a numeracao dos nodos em 0
+	if(rodada == n + 1 && nodo[n].proposal != -1 && brcast[rodada] == false && delivered[rodada -1] == false){
+		brcast[rodada] = true;
+
+		//armazena em mensagens todas as mensagens ja enviadas pelo broadcast,
+		//contendo o id de origem e o timestamp (unico para cada mensagem)
+		//--- transforma a string em um tmsg ---
+		mensagens.push_back(tmsg{'T', "decid rodada: "+ std::to_string(rodada) + " valor: " + std::to_string(nodo[n].proposal), nodo[token].idr, timestamp});
+		tam = mensagens.size()-1;
+		// std::cout << "Mensagem armazenada::::::::::::::::::" << mensagens[mensagens.size()-1].m << "\n";
+
+		ultima_msg->type = mensagens[tam].type;
+		ultima_msg->m.assign(mensagens[tam].m);
+		ultima_msg->idorigem = mensagens[tam].idorigem;
+		ultima_msg->timestamp = mensagens[tam].timestamp;
+		//incrementa o timestamp sempre que gera uma nova mensagem
+		timestamp++;
+
+		ultima_rodada = rodada;
+		ultimo_valor = nodo[n].proposal;
+
+		nodo[n].proposer = n;
+		printf("[DECIDE] O nodo %d decidiu pelo valor %d! Enviando a decisao para os demais nodos...\n", n, nodo[n].proposal);
+		schedule(broadcast, 0.5, n);
+	}
+}
+
+void conta_rodada(){
+	//se rodada E detected && delivered[rodada] = true
+	for(int i = 0; i < detected.size(); i++){
+		if(rodada - 1 == detected[i] || delivered[rodada] == true){
+			rodada++;
+			printf("\n[NOVA RODADA] ----------- inicio da rodada %d -------------\n\n", rodada);
+			conta_rodada();
+		}
+	}
+	verify(rodada - 1);
+}
 //funcao que printa o vetor state de todos os nodos
 void print_state(std:: vector<tnodo> &nodo, int n){
 
@@ -492,6 +552,7 @@ int main(int argc, char const *argv[]) {
 	stream(1);
 	// nodo = (tnodo*) malloc(sizeof(tnodo)*N);
 	nodo.resize(N);
+	detected.resize(N);
 
 	for (i = 0; i < N; i++) {
 	 	memset(fa_name, '\0', 5);
@@ -502,6 +563,15 @@ int main(int argc, char const *argv[]) {
 		nodo[i].state = (int*) malloc (sizeof(int)*N);
 		//para cada nodo cria vetor last
 		nodo[i].last.resize(N);
+
+		delivered.resize(N+1);
+		brcast.resize(N+1);
+
+		delivered[i+1] = false;
+		brcast[i+1] = false;
+		nodo[i].proposal = -1;
+		nodo[i].proposer = -1;
+
 		for (int j = 0; j < N; j++){
 			nodo[i].state[j] = 0;
 			nodo[i].last[j].type = 'N';
@@ -520,13 +590,14 @@ int main(int argc, char const *argv[]) {
 	while(!feof(tp)){
 		fscanf(tp, "%s %f %d\n", evento, &tempo, &processo);
 		// printf("%s %f %d\n", evento, tempo, processo);
-		schedule((strcmp("fault", evento) == 0 ? fault : (strcmp("repair", evento) == 0 ? repair : (strcmp("broadcast", evento) == 0 ? broadcast : (strcmp("new_msg", evento) == 0 ? new_msg : test)))), tempo, processo);
+		schedule((strcmp("fault", evento) == 0 ? fault : (strcmp("repair", evento) == 0 ? repair : (strcmp("broadcast", evento) == 0 ? broadcast : (strcmp("new_msg", evento) == 0 ? new_msg : (strcmp("propose", evento) == 0 ? propose : test))))), tempo, processo);
 		//escalona os eventos. Faz a verificação de string pois o schedule não aceita string como parâmetro
 	}
 	fclose(tp);
 
 	aux = N;
 	 printf("Programa inicializa - todos os nodos estao *sem-falha*\n");
+	 printf("\n[NOVA RODADA] ----------- inicio da rodada %d ------------\n\n", rodada);
 	 for(s = 0; aux != 1; aux /= 2, s++);//for para calcular o valor de S (log de n)
 	 tests = testes(N, s, nodo); //calcula quais os testes executados
 	//  for(i = 0; i < N; i++){//printa os testes executados por cada nodo, apos ser calculado
@@ -624,7 +695,7 @@ int main(int argc, char const *argv[]) {
 				totalrodadas++;//aumenta as rodadas do programa todo
 				if(logtype)
 					print_state(nodo, N);
-				printf("\t------ Fim da rodada %d ------\n", totalrodadas);
+				// printf("\t------ Fim da rodada %d ------\n", totalrodadas);
 
 				if (i == N && end == 1){
 					//todos os vetores SEM-FALHA foram comparados e sao iguais
@@ -662,6 +733,9 @@ int main(int argc, char const *argv[]) {
 			// 		printf("%d ", tests[i].vector[j]);
 			// 	printf("\n");
 			// }
+
+			detected.push_back(token);
+			conta_rodada();
 			break;
 
 	 		case repair:
@@ -707,7 +781,7 @@ int main(int argc, char const *argv[]) {
 				// 	// printf("Status do nodo: %d\n", status(nodo[ultima_msg->idorigem].id));
 				// 	if(status(nodo[ultima_msg->idorigem].id) != 0){
 				// 		// std::cout <<"Fazendo novo broadcast para os vizinhos sem-falha... " << "\n";
-				// 		schedule(broadcast, 1.0, token);
+				// 		schedule(, 1.0, token);
 				// 		// broadcast(*ultima_msg);
 				// 		break;
 				// 	}
@@ -805,8 +879,13 @@ int main(int argc, char const *argv[]) {
 				nodo[token].last[token].timestamp = ultima_msg->timestamp;
 
 				//deliver(m)
-				std::cout <<"[DELIVER] mensagem \"" << nodo[token].last[token].m << "\" foi entregue para a aplicacao pelo processo " << token << "\n\n";
+				std::cout <<"[DELIVER] mensagem \"" << nodo[token].last[token].m << "\" foi entregue para a aplicacao pelo processo " << token << "\n";
 
+				if(ultima_rodada < nodo[token].idr + 1 && ultima_rodada > nodo[token].proposer){
+					nodo[token].proposal = ultimo_valor;
+					nodo[token].proposer = ultima_rodada;
+					delivered[ultima_rodada] = true;
+				}
 
 			}
 			//enviar a todos os vizinhos corretos que pertencem ao cluster s
@@ -847,6 +926,15 @@ int main(int argc, char const *argv[]) {
 			// }
 
 			break;
+
+			case propose:
+			// printf("nodo[token].proposal: %d\n", nodo[token].proposal);
+				if(nodo[token].proposal == -1){
+					nodo[token].proposal = rand() % 30;
+					printf("[PROPOSE] O nodo %d propos o valor -> %d\n", token, nodo[token].proposal);
+
+					verify(token);
+				}
 
 	 	}
 	}
